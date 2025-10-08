@@ -1,0 +1,27 @@
+[project]
+name = "tinyrecursivemodels"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "adam-atan2",
+    "argdantic",
+    "coolname",
+    "einops",
+    "huggingface-hub",
+    "hydra-core",
+    "ninja",
+    "numba",
+    "omegaconf",
+    "packaging",
+    "pydantic",
+    "pydantic-core",
+    "setuptools",
+    "setuptools-scm",
+    "torch",
+    "tqdm",
+    "wandb",
+    "wheel",
+    "triton; sys_platform != 'darwin'",
+]

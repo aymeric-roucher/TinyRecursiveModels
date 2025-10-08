@@ -32,10 +32,21 @@ def stablemax_cross_entropy(logits, labels, ignore_index: int = -100, valid_mask
     return -torch.where(valid_mask, prediction_logprobs, 0)
 
 
-def softmax_cross_entropy(logits, labels, ignore_index: int = -100):
-    # Cast logits to f32
+def softmax_cross_entropy(logits, labels, ignore_index: int = -100, valid_mask=None):
+    # Cast logits to f32 and ensure contiguous
+    logits_f32 = logits.to(torch.float32).contiguous()
+    labels_long = labels.to(torch.long).contiguous()
     # Flatten logits
-    return F.cross_entropy(logits.to(torch.float32).view(-1, logits.shape[-1]), labels.to(torch.long).view(-1), ignore_index=ignore_index, reduction="none").view(labels.shape)
+    loss = F.cross_entropy(
+        logits_f32.view(-1, logits.shape[-1]),
+        labels_long.view(-1),
+        ignore_index=ignore_index,
+        reduction="none"
+    ).view(labels.shape)
+    # Apply valid_mask if provided (for consistency with stablemax_cross_entropy)
+    if valid_mask is not None:
+        loss = torch.where(valid_mask, loss, 0)
+    return loss
 
 
 class ACTLossHead(nn.Module):

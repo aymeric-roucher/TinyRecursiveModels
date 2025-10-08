@@ -1,4 +1,4 @@
-name: recursive_reasoning.trm_singlez@TinyRecursiveReasoningModel_ACTV1
+name: recursive_reasoning.trm_singlez@TinyRecursiveModelSingleZ
 loss:
   name: losses@ACTLossHead
   loss_type: stablemax_cross_entropy
@@ -6,11 +6,11 @@ loss:
 halt_exploration_prob: 0.1
 halt_max_steps: 16
 
-H_cycles: 3
-L_cycles: 6
+y_cycles: 3  # Number of y update cycles (H_cycles in HRM)
+z_cycles: 6  # Number of z recursion steps per y cycle (L_cycles in HRM)
 
-H_layers: 0
-L_layers: 2
+H_layers: 0  # Deprecated (kept for backward compatibility)
+num_layers: 2  # Number of layers in the network (L_layers in HRM)
 
 hidden_size: 512
 num_heads: 8  # min(2, hidden_size // 64)

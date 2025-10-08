@@ -15,6 +15,6 @@ wheel
 setuptools 
 setuptools-scm
 pydantic-core
-huggingface_hub 
+huggingface_hub
 numba
 triton
