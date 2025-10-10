@@ -112,21 +112,17 @@ class TinyRecursiveModelBlock(nn.Module):
         if self.config.mlp_t:
             hidden_states = hidden_states.transpose(1, 2)
             out = self.mlp_t(hidden_states)
-            hidden_states = rms_norm(
-                hidden_states + out, variance_epsilon=self.norm_eps
-            )
+            hidden_states = rms_norm(hidden_states + out, variance_epsilon=self.norm_eps)
             hidden_states = hidden_states.transpose(1, 2)
         else:
             # Self Attention
             hidden_states = rms_norm(
-                hidden_states
-                + self.self_attn(cos_sin=cos_sin, hidden_states=hidden_states),
+                hidden_states + self.self_attn(cos_sin=cos_sin, hidden_states=hidden_states),
                 variance_epsilon=self.norm_eps,
             )
         # Fully Connected
         out = self.mlp(hidden_states)
         hidden_states = rms_norm(hidden_states + out, variance_epsilon=self.norm_eps)
-        # NOTE from Aymeric: why not replace this custom function with a pytorch standard class?
         return hidden_states
 
 
@@ -255,9 +251,8 @@ class TinyRecursiveModel_Inner(nn.Module):
         # Position embeddings
         if self.config.pos_encodings == "learned":
             # scale by 1/sqrt(2) to maintain forward variance
-            embedding = 0.707106781 * (
-                embedding + self.embed_pos.embedding_weight.to(self.forward_dtype)
-            )
+            # Note: embed_pos.weight is already in correct dtype (no casting needed)
+            embedding = 0.707106781 * (embedding + self.embed_pos.weight)
 
         # Scale
         return self.embed_scale * embedding
@@ -299,27 +294,27 @@ class TinyRecursiveModel_Inner(nn.Module):
         # Deep recursion: y_cycles-1 without gradients, 1 with gradients
         y, z = latent.y, latent.z
 
-        # (y_cycles-1) deep recursion cycles without gradients
-        with torch.no_grad():
-            for _y_cycle in range(self.config.y_cycles - 1):
+        # Unified recursion loop (enables gradient only on final y-cycle)
+        for y_cycle in range(self.config.y_cycles):
+            is_final_cycle = y_cycle == self.config.y_cycles - 1
+
+            # Pre-compute y + input_embeddings once per y-cycle (not per z-cycle)
+            y_with_input = y + input_embeddings
+
+            with torch.set_grad_enabled(is_final_cycle):
                 # z_cycles latent recursion steps: update z given (x, y, z)
                 for _z_cycle in range(self.config.z_cycles):
-                    z = self.net(z, y + input_embeddings, **seq_info)
+                    z = self.net(z, y_with_input, **seq_info)
                 # Update y given (y, z)
                 y = self.net(y, z, **seq_info)
 
-        # Final cycle with gradients
-        for _z_cycle in range(self.config.z_cycles):
-            z = self.net(z, y + input_embeddings, **seq_info)
-        y = self.net(y, z, **seq_info)
-
         # Output: decode y to vocabulary logits
-        new_latent = LatentState(
-            y=y.detach(), z=z.detach()
-        )  # Detach for next supervision step
+        # Detach for next supervision step (avoid backprop through previous steps)
+        new_latent = LatentState(y=y.detach(), z=z.detach())
         output = self.lm_head(y)[:, self.puzzle_emb_len :]
-        q_logits = self.q_head(y[:, 0]).to(torch.float32)  # Q-head uses first position
-        return new_latent, output, (q_logits[..., 0], q_logits[..., 1])
+        # Q-head uses first position; unbind is more efficient than indexing twice
+        q_halt_logits, q_continue_logits = self.q_head(y[:, 0]).to(torch.float32).unbind(dim=-1)
+        return new_latent, output, (q_halt_logits, q_continue_logits)
 
 
 class TinyRecursiveModel(nn.Module):

@@ -42,14 +42,16 @@ class CastedSparseEmbedding(nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         if not self.training:
             # Test mode, no gradient
-            return self.weights[inputs].to(self.cast_to)
+            # No casting needed - weights are already in correct dtype from model.to()
+            return self.weights[inputs]
 
         # Training mode, fill puzzle embedding from weights
         with torch.no_grad():
             self.local_weights.copy_(self.weights[inputs])
             self.local_ids.copy_(inputs)
 
-        return self.local_weights.to(self.cast_to)
+        # No casting needed - local_weights inherits dtype from weights
+        return self.local_weights
 
 
 class CastedSparseEmbeddingSignSGD_Distributed(Optimizer):
@@ -92,15 +94,15 @@ class CastedSparseEmbeddingSignSGD_Distributed(Optimizer):
 
             # Apply SignSGD
             # Adam ≈ SignSGD if gradient is very sparse
-            if local_weights_grad is not None:
-                _sparse_emb_signsgd_dist(
-                    local_weights_grad,
-                    local_ids,
-                    weights,
-                    lr=group["lr"],
-                    weight_decay=group["weight_decay"],
-                    world_size=group["world_size"],
-                )
+            assert local_weights_grad is not None:
+            _sparse_emb_signsgd_dist(
+                local_weights_grad,
+                local_ids,
+                weights,
+                lr=group["lr"],
+                weight_decay=group["weight_decay"],
+                world_size=group["world_size"],
+            )
 
 
 def _sparse_emb_signsgd_dist(

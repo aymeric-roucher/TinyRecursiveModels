@@ -17,16 +17,25 @@ def log_stablemax(x, dim=-1):
 
 
 def stablemax_cross_entropy(logits, labels, ignore_index: int = -100, valid_mask=None):
+    """
+    Stablemax cross-entropy loss (optimized version).
+    Uses custom stablemax normalization instead of softmax.
+    """
     logprobs = log_stablemax(logits.to(torch.float32), dim=-1)
 
     if valid_mask is None:
         valid_mask = labels != ignore_index
-    transformed_labels = torch.where(valid_mask, labels, 0)
+
+    # Clamp labels to valid range (invalid labels will be masked out anyway)
+    labels_clamped = labels.clamp(min=0)
+
+    # Gather log probabilities for target labels
     prediction_logprobs = torch.gather(
-        logprobs, index=transformed_labels.to(torch.long).unsqueeze(-1), dim=-1
+        logprobs, dim=-1, index=labels_clamped.to(torch.long).unsqueeze(-1)
     ).squeeze(-1)
 
-    return -torch.where(valid_mask, prediction_logprobs, 0)
+    # Apply mask and return negative log likelihood
+    return torch.where(valid_mask, -prediction_logprobs, 0.0)
 
 
 def softmax_cross_entropy(logits, labels, ignore_index: int = -100, valid_mask=None):
