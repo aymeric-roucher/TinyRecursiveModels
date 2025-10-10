@@ -195,7 +195,8 @@ class TinyRecursiveModelSingleZ_Inner(nn.Module):
         # Reasoning Layers - single network for all updates
         self.net = TinyRecursiveModelSingleZReasoningModule(
             layers=[
-                TinyRecursiveModelSingleZBlock(self.config) for _i in range(self.config.num_layers)
+                TinyRecursiveModelSingleZBlock(self.config)
+                for _i in range(self.config.num_layers)
             ]
         )
 
@@ -331,7 +332,7 @@ class TinyRecursiveModelSingleZ(nn.Module):
     def puzzle_emb(self):
         return self.inner.puzzle_emb
 
-    def initial_state(self, batch: Dict[str, torch.Tensor]):
+    def initial_carry(self, batch: Dict[str, torch.Tensor]):
         batch_size = batch["inputs"].shape[0]
 
         return TinyRecursiveModelSingleZState(
@@ -345,7 +346,7 @@ class TinyRecursiveModelSingleZ(nn.Module):
 
     # Backward compatibility alias
     def initial_carry(self, batch: Dict[str, torch.Tensor]):
-        return self.initial_state(batch)
+        return self.initial_carry(batch)
 
     def forward(
         self,
@@ -416,7 +417,9 @@ class TinyRecursiveModelSingleZ(nn.Module):
                         )
                     )
 
-        return TinyRecursiveModelSingleZState(new_latent, new_steps, halted, new_current_data), outputs
+        return TinyRecursiveModelSingleZState(
+            new_latent, new_steps, halted, new_current_data
+        ), outputs
 
 
 # Backward compatibility aliases

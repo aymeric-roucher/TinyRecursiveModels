@@ -23,8 +23,9 @@ IGNORE_LABEL_ID = -100
 
 
 @dataclass
-class MultiScaleLatentState:
+class MultiScaleLatentCarry:
     """Multi-scale z variant - carries answer y and 6 separate latent reasoning features z1-z6"""
+
     y: torch.Tensor  # Embedded answer (was z_H)
     z1: torch.Tensor  # Latent reasoning scale 1 (was z_L1)
     z2: torch.Tensor  # Latent reasoning scale 2 (was z_L2)
@@ -35,9 +36,10 @@ class MultiScaleLatentState:
 
 
 @dataclass
-class TinyRecursiveModelMultiScaleState:
+class TinyRecursiveModelMultiScaleCarry:
     """State for TinyRecursiveModel multi-scale variant"""
-    latent: MultiScaleLatentState
+
+    latent: MultiScaleLatentCarry
 
     steps: torch.Tensor
     halted: torch.Tensor
@@ -293,7 +295,7 @@ class TinyRecursiveModelMultiScale_Inner(nn.Module):
         return self.embed_scale * embedding
 
     def empty_latent_state(self, batch_size: int):
-        return MultiScaleLatentState(
+        return MultiScaleLatentCarry(
             y=torch.empty(
                 batch_size,
                 self.config.seq_len + self.puzzle_emb_len,
@@ -341,9 +343,9 @@ class TinyRecursiveModelMultiScale_Inner(nn.Module):
     def reset_latent_state(
         self,
         reset_flag: torch.Tensor,
-        latent: MultiScaleLatentState,
+        latent: MultiScaleLatentCarry,
     ):
-        return MultiScaleLatentState(
+        return MultiScaleLatentCarry(
             y=torch.where(reset_flag.view(-1, 1, 1), self.y_init, latent.y),
             z1=torch.where(reset_flag.view(-1, 1, 1), self.z1_init, latent.z1),
             z2=torch.where(reset_flag.view(-1, 1, 1), self.z2_init, latent.z2),
@@ -355,10 +357,10 @@ class TinyRecursiveModelMultiScale_Inner(nn.Module):
 
     def forward(
         self,
-        latent: MultiScaleLatentState,
+        latent: MultiScaleLatentCarry,
         batch: Dict[str, torch.Tensor],
     ) -> Tuple[
-        MultiScaleLatentState,
+        MultiScaleLatentCarry,
         torch.Tensor,
         Tuple[torch.Tensor, torch.Tensor],
     ]:
@@ -381,9 +383,7 @@ class TinyRecursiveModelMultiScale_Inner(nn.Module):
                 # z_cycles latent recursion steps: update each z_i given (x, y, all z)
                 for _z_cycle in range(self.config.z_cycles):
                     z_sum = z[0] + z[1] + z[2] + z[3] + z[4] + z[5]
-                    z[_z_cycle] = self.net(
-                        z_sum, y + input_embeddings, **seq_info
-                    )
+                    z[_z_cycle] = self.net(z_sum, y + input_embeddings, **seq_info)
                 # Update y given (y, all z)
                 z_sum = z[0] + z[1] + z[2] + z[3] + z[4] + z[5]
                 y = self.net(y, z_sum, **seq_info)
@@ -396,7 +396,7 @@ class TinyRecursiveModelMultiScale_Inner(nn.Module):
         y = self.net(y, z_sum, **seq_info)
 
         # Output: decode y to vocabulary logits
-        new_latent = MultiScaleLatentState(
+        new_latent = MultiScaleLatentCarry(
             y=y.detach(),
             z1=z[0].detach(),
             z2=z[1].detach(),
@@ -416,12 +416,12 @@ class TinyRecursiveModelMultiScale(nn.Module):
     def __init__(self, config_dict: dict):
         super().__init__()
         # Support both old and new parameter names for backward compatibility
-        if 'H_cycles' in config_dict and 'y_cycles' not in config_dict:
-            config_dict['y_cycles'] = config_dict['H_cycles']
-        if 'L_cycles' in config_dict and 'z_cycles' not in config_dict:
-            config_dict['z_cycles'] = config_dict['L_cycles']
-        if 'L_layers' in config_dict and 'num_layers' not in config_dict:
-            config_dict['num_layers'] = config_dict['L_layers']
+        if "H_cycles" in config_dict and "y_cycles" not in config_dict:
+            config_dict["y_cycles"] = config_dict["H_cycles"]
+        if "L_cycles" in config_dict and "z_cycles" not in config_dict:
+            config_dict["z_cycles"] = config_dict["L_cycles"]
+        if "L_layers" in config_dict and "num_layers" not in config_dict:
+            config_dict["num_layers"] = config_dict["L_layers"]
 
         self.config = TinyRecursiveModelMultiScaleConfig(**config_dict)
         self.inner = TinyRecursiveModelMultiScale_Inner(self.config)
@@ -430,25 +430,23 @@ class TinyRecursiveModelMultiScale(nn.Module):
     def puzzle_emb(self):
         return self.inner.puzzle_emb
 
-    def initial_state(self, batch: Dict[str, torch.Tensor]):
+    def initial_carry(self, batch: Dict[str, torch.Tensor]):
         batch_size = batch["inputs"].shape[0]
 
-        return TinyRecursiveModelMultiScaleState(
-            latent=self.inner.empty_latent_state(batch_size),  # Empty is expected, will be reset in first pass as all sequences are halted
+        return TinyRecursiveModelMultiScaleCarry(
+            latent=self.inner.empty_latent_state(
+                batch_size
+            ),  # Empty is expected, will be reset in first pass as all sequences are halted
             steps=torch.zeros((batch_size,), dtype=torch.int32),
             halted=torch.ones((batch_size,), dtype=torch.bool),  # Default to halted
             current_data={k: torch.empty_like(v) for k, v in batch.items()},
         )
 
-    # Backward compatibility alias
-    def initial_carry(self, batch: Dict[str, torch.Tensor]):
-        return self.initial_state(batch)
-
     def forward(
         self,
-        carry: TinyRecursiveModelMultiScaleState,
+        carry: TinyRecursiveModelMultiScaleCarry,
         batch: Dict[str, torch.Tensor],
-    ) -> Tuple[TinyRecursiveModelMultiScaleState, Dict[str, torch.Tensor]]:
+    ) -> Tuple[TinyRecursiveModelMultiScaleCarry, Dict[str, torch.Tensor]]:
         # Update data and latent state (reset for halted sequences)
         new_latent = self.inner.reset_latent_state(carry.halted, carry.latent)
 
@@ -502,8 +500,8 @@ class TinyRecursiveModelMultiScale(nn.Module):
                     # NOTE: No replay buffer and target networks for computing target Q-value.
                     # As batch_size is large, there're many parallel envs.
                     # Similar concept as PQN https://arxiv.org/abs/2407.04811
-                    _, _, (next_q_halt_logits, next_q_continue_logits) = (
-                        self.inner(new_latent, new_current_data)
+                    _, _, (next_q_halt_logits, next_q_continue_logits) = self.inner(
+                        new_latent, new_current_data
                     )
                     outputs["target_q_continue"] = torch.sigmoid(
                         torch.where(
@@ -513,7 +511,7 @@ class TinyRecursiveModelMultiScale(nn.Module):
                         )
                     )
 
-        return TinyRecursiveModelMultiScaleState(
+        return TinyRecursiveModelMultiScaleCarry(
             new_latent, new_steps, halted, new_current_data
         ), outputs
 
@@ -521,5 +519,5 @@ class TinyRecursiveModelMultiScale(nn.Module):
 # Backward compatibility aliases
 TinyRecursiveReasoningModel_ACTV1 = TinyRecursiveModelMultiScale
 TinyRecursiveReasoningModel_ACTV1Config = TinyRecursiveModelMultiScaleConfig
-TinyRecursiveReasoningModel_ACTV1Carry = TinyRecursiveModelMultiScaleState
-TinyRecursiveReasoningModel_ACTV1InnerCarry = MultiScaleLatentState
+TinyRecursiveReasoningModel_ACTV1Carry = TinyRecursiveModelMultiScaleCarry
+TinyRecursiveReasoningModel_ACTV1InnerCarry = MultiScaleLatentCarry
