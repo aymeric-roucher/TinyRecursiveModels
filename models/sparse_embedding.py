@@ -94,7 +94,7 @@ class CastedSparseEmbeddingSignSGD_Distributed(Optimizer):
 
             # Apply SignSGD
             # Adam ≈ SignSGD if gradient is very sparse
-            assert local_weights_grad is not None:
+            assert local_weights_grad is not None
             _sparse_emb_signsgd_dist(
                 local_weights_grad,
                 local_ids,
