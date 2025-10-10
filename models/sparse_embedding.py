@@ -42,16 +42,14 @@ class CastedSparseEmbedding(nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         if not self.training:
             # Test mode, no gradient
-            # No casting needed - weights are already in correct dtype from model.to()
-            return self.weights[inputs]
+            return self.weights[inputs].to(self.cast_to)
 
         # Training mode, fill puzzle embedding from weights
         with torch.no_grad():
             self.local_weights.copy_(self.weights[inputs])
             self.local_ids.copy_(inputs)
 
-        # No casting needed - local_weights inherits dtype from weights
-        return self.local_weights
+        return self.local_weights.to(self.cast_to)
 
 
 class CastedSparseEmbeddingSignSGD_Distributed(Optimizer):

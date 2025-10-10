@@ -43,34 +43,48 @@ def apply_rotary_pos_emb(
     return q_embed.to(orig_dtype), k_embed.to(orig_dtype)
 
 
-class CastedLinear(nn.Linear):
-    """Optimized Linear layer with custom initialization. No runtime casting overhead."""
+class CastedLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int, bias: bool):
-        # Initialize as standard Linear
-        super().__init__(in_features, out_features, bias=bias)
+        super().__init__()
+        # Truncated LeCun normal init
+        self.weight = nn.Parameter(
+            trunc_normal_init_(
+                torch.empty((out_features, in_features)), std=1.0 / (in_features**0.5)
+            )
+        )
+        self.bias = None
+        if bias:
+            # Zero init bias
+            self.bias = nn.Parameter(torch.zeros((out_features,)))
 
-        # Apply truncated LeCun normal init to weight
-        with torch.no_grad():
-            trunc_normal_init_(self.weight, std=1.0 / (in_features**0.5))
-            if bias and self.bias is not None:
-                self.bias.zero_()
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return F.linear(
+            input,
+            self.weight.to(input.dtype),
+            bias=self.bias.to(input.dtype) if self.bias is not None else None,
+        )
 
 
-class CastedEmbedding(nn.Embedding):
-    """Optimized Embedding layer with custom initialization. No runtime casting overhead."""
+class CastedEmbedding(nn.Module):
     def __init__(
         self,
         num_embeddings: int,
         embedding_dim: int,
         init_std: float,
-        cast_to: torch.dtype,  # Kept for backward compatibility but not used at runtime
+        cast_to: torch.dtype,
     ):
-        # Initialize as standard Embedding
-        super().__init__(num_embeddings, embedding_dim)
+        super().__init__()
+        self.cast_to = cast_to
 
-        # Apply truncated LeCun normal init
-        with torch.no_grad():
-            trunc_normal_init_(self.weight, std=init_std)
+        # Truncated LeCun normal init
+        self.embedding_weight = nn.Parameter(
+            trunc_normal_init_(
+                torch.empty((num_embeddings, embedding_dim)), std=init_std
+            )
+        )
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return F.embedding(input, self.embedding_weight.to(self.cast_to))
 
 
 class RotaryEmbedding(nn.Module):
@@ -182,6 +196,6 @@ def rms_norm(hidden_states: torch.Tensor, variance_epsilon: float) -> torch.Tens
     Keeps computation in the input dtype (typically bfloat16) for speed.
     """
     # Compute variance directly in input dtype (bfloat16/float16 is sufficient for this)
-    variance = hidden_states.pow(2).mean(-1, keepdim=True)
+    variance = hidden_states.square().mean(-1, keepdim=True)
     hidden_states = hidden_states * torch.rsqrt(variance + variance_epsilon)
     return hidden_states

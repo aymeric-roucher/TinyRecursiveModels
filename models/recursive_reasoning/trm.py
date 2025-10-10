@@ -161,7 +161,6 @@ class TinyRecursiveModel_Inner(nn.Module):
             self.config.hidden_size, self.config.vocab_size, bias=False
         )
         self.q_head = CastedLinear(self.config.hidden_size, 2, bias=True)
-        # NOTE from Aymeric: why not cast once? Why these custom layers?
 
         self.puzzle_emb_len = (
             -(self.config.puzzle_emb_ndim // -self.config.hidden_size)
@@ -251,8 +250,9 @@ class TinyRecursiveModel_Inner(nn.Module):
         # Position embeddings
         if self.config.pos_encodings == "learned":
             # scale by 1/sqrt(2) to maintain forward variance
-            # Note: embed_pos.weight is already in correct dtype (no casting needed)
-            embedding = 0.707106781 * (embedding + self.embed_pos.weight)
+            embedding = 0.707106781 * (
+                embedding + self.embed_pos.embedding_weight.to(self.forward_dtype)
+            )
 
         # Scale
         return self.embed_scale * embedding
@@ -294,27 +294,26 @@ class TinyRecursiveModel_Inner(nn.Module):
         # Deep recursion: y_cycles-1 without gradients, 1 with gradients
         y, z = latent.y, latent.z
 
-        # Unified recursion loop (enables gradient only on final y-cycle)
-        for y_cycle in range(self.config.y_cycles):
-            is_final_cycle = y_cycle == self.config.y_cycles - 1
-
-            # Pre-compute y + input_embeddings once per y-cycle (not per z-cycle)
-            y_with_input = y + input_embeddings
-
-            with torch.set_grad_enabled(is_final_cycle):
+        # (y_cycles-1) deep recursion cycles without gradients
+        with torch.no_grad():
+            for _y_cycle in range(self.config.y_cycles - 1):
                 # z_cycles latent recursion steps: update z given (x, y, z)
                 for _z_cycle in range(self.config.z_cycles):
-                    z = self.net(z, y_with_input, **seq_info)
+                    z = self.net(z, y + input_embeddings, **seq_info)
                 # Update y given (y, z)
                 y = self.net(y, z, **seq_info)
+
+        # Final cycle with gradients
+        for _z_cycle in range(self.config.z_cycles):
+            z = self.net(z, y + input_embeddings, **seq_info)
+        y = self.net(y, z, **seq_info)
 
         # Output: decode y to vocabulary logits
         # Detach for next supervision step (avoid backprop through previous steps)
         new_latent = LatentState(y=y.detach(), z=z.detach())
         output = self.lm_head(y)[:, self.puzzle_emb_len :]
-        # Q-head uses first position; unbind is more efficient than indexing twice
-        q_halt_logits, q_continue_logits = self.q_head(y[:, 0]).to(torch.float32).unbind(dim=-1)
-        return new_latent, output, (q_halt_logits, q_continue_logits)
+        q_logits = self.q_head(y[:, 0]).to(torch.float32)  # Q-head uses first position
+        return new_latent, output, (q_logits[..., 0], q_logits[..., 1])
 
 
 class TinyRecursiveModel(nn.Module):
@@ -411,7 +410,6 @@ class TinyRecursiveModel(nn.Module):
                     _, _, (next_q_halt_logits, next_q_continue_logits) = self.inner(
                         new_latent, new_current_data
                     )
-                    # NOTE from Aymeric (not experienced): why go through the whole inner forward again? We already did above.
                     outputs["target_q_continue"] = torch.sigmoid(
                         torch.where(
                             is_last_step,

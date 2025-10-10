@@ -21,7 +21,7 @@ def stablemax_cross_entropy(logits, labels, ignore_index: int = -100, valid_mask
     Stablemax cross-entropy loss (optimized version).
     Uses custom stablemax normalization instead of softmax.
     """
-    logprobs = log_stablemax(logits.to(torch.float32), dim=-1)
+    logprobs = log_stablemax(logits, dim=-1)
 
     if valid_mask is None:
         valid_mask = labels != ignore_index
