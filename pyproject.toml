@@ -5,7 +5,6 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "adam-atan2",
     "argdantic",
     "coolname",
     "einops",
@@ -24,4 +23,5 @@ dependencies = [
     "wandb",
     "wheel",
     "triton; sys_platform != 'darwin'",
+    "adam-atan2-pytorch>=0.1.18",
 ]
