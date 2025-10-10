@@ -88,7 +88,8 @@ class PretrainConfig(pydantic.BaseModel):
 
     # Benchmarking
     benchmark_mode: bool = False  # Enable detailed timing statistics
-    benchmark_steps: Optional[int] = None  # If set, stop after N steps
+    benchmark_steps: Optional[int] = None  # If set, number of steps to benchmark (excludes 10 warmup steps)
+    benchmark_warmup_steps: int = 10  # Number of warmup steps before benchmarking
 
 
 @dataclass
@@ -787,15 +788,15 @@ def launch(hydra_config: DictConfig):
             # Stop early if benchmarking
             if (
                 config.benchmark_steps is not None
-                and train_state.step >= config.benchmark_steps
+                and train_state.step >= config.benchmark_steps + config.benchmark_warmup_steps
             ):
                 if RANK == 0 and config.benchmark_mode:
                     # Print benchmark stats
                     import numpy as np
 
                     timings = np.array(
-                        benchmark_timings[10:]
-                    )  # Skip first 10 for warmup
+                        benchmark_timings[config.benchmark_warmup_steps:]
+                    )  # Skip warmup steps
                     total_time = time.perf_counter() - benchmark_start_time
                     steps = len(timings)
 
@@ -819,7 +820,9 @@ def launch(hydra_config: DictConfig):
                     print("\n" + "=" * 60)
                     print("BENCHMARK RESULTS")
                     print("=" * 60)
-                    print(f"Total steps: {steps}")
+                    print(f"Warmup steps: {config.benchmark_warmup_steps}")
+                    print(f"Benchmark steps: {steps}")
+                    print(f"Total steps run: {config.benchmark_warmup_steps + steps}")
                     print(f"Total time: {total_time:.2f}s")
                     print(f"Steps/sec: {benchmark_results['steps_per_second']:.2f}")
                     print(

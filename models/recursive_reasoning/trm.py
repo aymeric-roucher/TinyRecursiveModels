@@ -397,6 +397,9 @@ class TinyRecursiveModel(nn.Module):
                 else:
                     halted = halted | (q_halt_logits > q_continue_logits)
 
+                # Force minimum steps (prevent premature halting)
+                halted = halted & (new_steps >= 2)
+
                 # Exploration
                 min_halt_steps = (
                     torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob
