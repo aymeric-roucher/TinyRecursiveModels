@@ -19,7 +19,7 @@ num_heads: 6  # 384 / 64 = 6 heads
 expansion: 4
 
 # Pretrained embeddings from sentence-transformers
-pretrained_embeddings_model: "Lajavaness/bilingual-embedding-small"
+pretrained_embeddings_model: "TaylorAI/gte-tiny"
 freeze_embeddings: false  # Allow fine-tuning
 
 # No puzzle embeddings for text tasks
