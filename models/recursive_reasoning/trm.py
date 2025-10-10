@@ -61,6 +61,7 @@ class TinyRecursiveModelConfig(BaseModel):
     expansion: float
     num_heads: int
     pos_encodings: str
+    causal: bool = False  # Use causal attention for autoregressive tasks (e.g., next-token prediction)
 
     rms_norm_eps: float = 1e-5
     rope_theta: float = 10000.0
@@ -75,6 +76,10 @@ class TinyRecursiveModelConfig(BaseModel):
     mlp_t: bool = False  # use mlp on L instead of transformer
     puzzle_emb_len: int = 16  # if non-zero, its specified to this value
     no_ACT_continue: bool = True  # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
+
+    # Pretrained embeddings from sentence-transformers
+    pretrained_embeddings_model: str = ""  # HuggingFace model name (e.g., 'Lajavaness/bilingual-embedding-small')
+    freeze_embeddings: bool = False  # If True, freeze embedding weights during training
 
 
 class TinyRecursiveModelBlock(nn.Module):
@@ -98,7 +103,7 @@ class TinyRecursiveModelBlock(nn.Module):
                 head_dim=config.hidden_size // config.num_heads,
                 num_heads=config.num_heads,
                 num_key_value_heads=config.num_heads,
-                causal=False,
+                causal=config.causal,
             )
         self.mlp = SwiGLU(
             hidden_size=config.hidden_size,
@@ -154,15 +159,36 @@ class TinyRecursiveModel_Inner(nn.Module):
         self.embed_scale = math.sqrt(self.config.hidden_size)
         embed_init_std = 1.0 / self.embed_scale
 
+        # Token embedding
         self.embed_tokens = CastedEmbedding(
             self.config.vocab_size,
             self.config.hidden_size,
             init_std=embed_init_std,
             cast_to=self.forward_dtype,
         )
+
+        # Load pretrained embeddings if specified
+        if self.config.pretrained_embeddings_model:
+            from models.pretrained_embeddings import load_pretrained_embeddings
+
+            pretrained_weights, _ = load_pretrained_embeddings(
+                self.config.pretrained_embeddings_model,
+                expected_vocab_size=self.config.vocab_size,
+                expected_embedding_dim=self.config.hidden_size,
+            )
+
+            # Initialize embedding layer with pretrained weights
+            with torch.no_grad():
+                self.embed_tokens.embedding_weight.copy_(pretrained_weights)
+
+            # Optionally freeze embeddings
+            if self.config.freeze_embeddings:
+                self.embed_tokens.embedding_weight.requires_grad = False
+
         self.lm_head = CastedLinear(
             self.config.hidden_size, self.config.vocab_size, bias=False
         )
+
         self.q_head = CastedLinear(self.config.hidden_size, 2, bias=True)
 
         self.puzzle_emb_len = (
