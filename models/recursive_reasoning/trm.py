@@ -78,7 +78,9 @@ class TinyRecursiveModelConfig(BaseModel):
     no_ACT_continue: bool = True  # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
 
     # Pretrained embeddings from sentence-transformers
-    pretrained_embeddings_model: str = ""  # HuggingFace model name (e.g., 'Lajavaness/bilingual-embedding-small')
+    pretrained_embeddings_model: str = (
+        ""  # HuggingFace model name (e.g., 'Lajavaness/bilingual-embedding-small')
+    )
     freeze_embeddings: bool = False  # If True, freeze embedding weights during training
 
 
@@ -283,8 +285,11 @@ class TinyRecursiveModel_Inner(nn.Module):
                 embedding + self.embed_pos.embedding_weight.to(self.forward_dtype)
             )
 
-        # Scale
-        return self.embed_scale * embedding
+        # Scale - but NOT for pretrained embeddings (they're already normalized)
+        if self.config.pretrained_embeddings_model:
+            return embedding
+        else:
+            return self.embed_scale * embedding
 
     def empty_latent_state(self, batch_size: int):
         return LatentState(
@@ -341,8 +346,9 @@ class TinyRecursiveModel_Inner(nn.Module):
         new_latent = LatentState(
             y=y.detach(), z=z.detach()
         )  # Detach for next supervision step
+
         output = self.lm_head(y)[:, self.puzzle_emb_len :]
-        q_logits = self.q_head(y[:, 0]).to(torch.float32)  # Q-head uses first position
+        q_logits = self.q_head(y[:, 0]).to(torch.float32)
         return new_latent, output, (q_logits[..., 0], q_logits[..., 1])
 
 

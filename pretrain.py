@@ -53,6 +53,7 @@ class PretrainConfig(pydantic.BaseModel):
 
     # Hyperparams
     global_batch_size: int
+    gradient_accumulation_steps: int = 1
     epochs: int
 
     lr: float
@@ -100,6 +101,7 @@ class TrainState:
 
     step: int
     total_steps: int
+    accumulation_step: int = 0  # Track gradient accumulation
 
 
 def create_dataloader(
@@ -128,6 +130,107 @@ def create_dataloader(
     return dataloader, dataset.metadata
 
 
+def count_parameters(model: nn.Module) -> dict[str, float]:
+    """Count parameters in different parts of the model (in millions)."""
+    inner = (
+        model.model.inner
+        if hasattr(model, "model")
+        else model.inner
+        if hasattr(model, "inner")
+        else model
+    )
+
+    # Detailed parameter breakdown
+    # 1. Input embeddings (used once to create input_embeddings)
+    embed_tokens_params = (
+        sum(p.numel() for p in inner.embed_tokens.parameters())
+        if hasattr(inner, "embed_tokens")
+        else 0
+    )
+    embed_pos_params = (
+        sum(p.numel() for p in inner.embed_pos.parameters())
+        if hasattr(inner, "embed_pos")
+        else 0
+    )
+    puzzle_emb_params = (
+        sum(p.numel() for p in inner.puzzle_emb.parameters())
+        if hasattr(inner, "puzzle_emb")
+        else 0
+    )
+    rotary_emb_params = (
+        sum(p.numel() for p in inner.rotary_emb.parameters())
+        if hasattr(inner, "rotary_emb")
+        else 0
+    )
+
+    input_embed_params = (
+        embed_tokens_params + embed_pos_params + puzzle_emb_params + rotary_emb_params
+    )
+
+    # 2. Recurrent reasoning module (net) - used y_cycles * (z_cycles + 1) times
+    net_params = (
+        sum(p.numel() for p in inner.net.parameters()) if hasattr(inner, "net") else 0
+    )
+
+    # 3. Output heads (used once per forward pass)
+    lm_head_params = (
+        sum(p.numel() for p in inner.lm_head.parameters())
+        if hasattr(inner, "lm_head")
+        else 0
+    )
+    q_head_params = (
+        sum(p.numel() for p in inner.q_head.parameters())
+        if hasattr(inner, "q_head")
+        else 0
+    )
+
+    # 4. Initial states (y_init, z_init - used once)
+    init_params = 0
+    if hasattr(inner, "y_init"):
+        init_params += inner.y_init.numel()
+    if hasattr(inner, "z_init"):
+        init_params += inner.z_init.numel()
+
+    output_params = lm_head_params + q_head_params + init_params
+
+    # Total unique parameters
+    total_params = sum(p.numel() for p in model.parameters())
+
+    # Verify our breakdown matches
+    accounted = input_embed_params + net_params + output_params
+    rest_params = net_params + output_params
+
+    # Get number of cycles for effective parameter count
+    y_cycles = inner.config.y_cycles if hasattr(inner, "config") else 1
+    z_cycles = inner.config.z_cycles if hasattr(inner, "config") else 1
+
+    # Trace through a forward pass:
+    # 1. Compute input_embeddings (uses input embeddings once)
+    # 2. For each of y_cycles y-cycles:
+    #    - z_cycles times: z = net(z, y + input_embeddings)  [net called z_cycles times]
+    #    - 1 time: y = net(y, z)                              [net called 1 time]
+    # 3. Compute output: lm_head(y), q_head(y)                [output heads used once]
+    total_net_passes = y_cycles * (z_cycles + 1)
+
+    # Effective parameters accounting for reuse
+    effective_params = (
+        input_embed_params * 1  # Input embeddings used once
+        + net_params * total_net_passes  # Net used multiple times
+        + output_params * 1  # Output heads/states used once
+    )
+
+    return {
+        "input_embeddings_M": input_embed_params / 1e6,
+        "net_M": net_params / 1e6,
+        "output_M": output_params / 1e6,
+        "total_M": total_params / 1e6,
+        "effective_M": effective_params / 1e6,
+        "net_passes": total_net_passes,
+        "y_cycles": y_cycles,
+        "z_cycles": z_cycles,
+    }
+
+
 def create_model(
     config: PretrainConfig,
     train_metadata: PuzzleDatasetMetadata,
@@ -135,13 +238,13 @@ def create_model(
     world_size: int,
     device: torch.device,
 ):
+    # Model batch_size is the per-device batch size (global_batch_size is per device in HF convention)
     model_cfg = dict(
         **config.arch.__pydantic_extra__,  # type: ignore
         batch_size=config.global_batch_size // world_size,
         vocab_size=train_metadata.vocab_size,
         seq_len=train_metadata.seq_len,
         num_puzzle_identifiers=train_metadata.num_puzzle_identifiers,
-        causal=False,  # Non-autoregressive
     )
 
     # Instantiate model with loss head
@@ -152,6 +255,34 @@ def create_model(
         model: nn.Module = model_cls(model_cfg)
         print(model)
         model = loss_head_cls(model, **config.arch.loss.__pydantic_extra__)  # type: ignore
+
+        # Log parameter counts
+        if rank == 0:
+            param_counts = count_parameters(model)
+            print("\n" + "=" * 70)
+            print("MODEL PARAMETER COUNTS")
+            print("=" * 70)
+            print(
+                f"Input embeddings:     {param_counts['input_embeddings_M']:>8.2f}M  (used 1x per forward)"
+            )
+            print(
+                f"Recurrent net:        {param_counts['net_M']:>8.2f}M  (used {param_counts['net_passes']:.0f}x per forward)"
+            )
+            print(
+                f"Output heads/states:  {param_counts['output_M']:>8.2f}M  (used 1x per forward)"
+            )
+            print("-" * 70)
+            print(f"Total unique params:  {param_counts['total_M']:>8.2f}M")
+            print(f"Effective params:     {param_counts['effective_M']:>8.2f}M")
+            print()
+            print(
+                f"Recursion structure: {param_counts['y_cycles']:.0f} y-cycles × ({param_counts['z_cycles']:.0f} z-cycles + 1 y-update)"
+            )
+            print(
+                f"                   = {param_counts['net_passes']:.0f} passes through net per forward"
+            )
+            print("=" * 70 + "\n")
+
         # torch.compile not supported on MPS yet
         if "DISABLE_COMPILE" not in os.environ and device.type != "mps":
             model = torch.compile(model)  # type: ignore
@@ -254,12 +385,14 @@ def init_train_state(
     world_size: int,
     device: torch.device,
 ):
-    # Estimated total training steps
+    # Estimated total training steps (optimizer steps, not forward passes)
+    # Effective batch size = global_batch_size * gradient_accumulation_steps
+    effective_batch_size = config.global_batch_size * config.gradient_accumulation_steps
     total_steps = int(
         config.epochs
         * train_metadata.total_groups
         * train_metadata.mean_puzzle_examples
-        / config.global_batch_size
+        / effective_batch_size
     )
 
     # Model
@@ -348,20 +481,30 @@ def train_batch(
     config: PretrainConfig,
     train_state: TrainState,
     batch: Any,
-    global_batch_size: int,
+    batch_size: int,
     rank: int,
     world_size: int,
     device: torch.device,
 ):
-    train_state.step += 1
-    if train_state.step > train_state.total_steps:  # At most train_total_steps
-        return
+    # Increment accumulation step
+    train_state.accumulation_step += 1
+    is_accumulation_step = (
+        train_state.accumulation_step % config.gradient_accumulation_steps != 0
+    )
+
+    # Only increment main step counter when accumulation is complete
+    if not is_accumulation_step:
+        train_state.step += 1
+        if train_state.step > train_state.total_steps:  # At most train_total_steps
+            return
 
     # To device
     batch = {k: v.to(device) for k, v in batch.items()}
 
-    # Init carry if it is None
-    if train_state.carry is None:
+    # Init carry
+    # For text training (no puzzle embeddings), reset every batch for fresh text windows
+    # For puzzle training with ACT, carry persists to continue iterating on same puzzle
+    if train_state.carry is None or config.arch.puzzle_emb_ndim == 0:
         with torch.device(device):
             train_state.carry = train_state.model.initial_carry(batch)  # type: ignore
 
@@ -370,50 +513,66 @@ def train_batch(
         carry=train_state.carry, batch=batch, return_keys=[]
     )
 
-    ((1 / global_batch_size) * loss).backward()
+    # Scale loss by effective batch size (HuggingFace convention)
+    # Effective batch = global_batch_size * gradient_accumulation_steps
+    effective_batch_size = config.global_batch_size * config.gradient_accumulation_steps
+    ((1 / effective_batch_size) * loss).backward()
 
-    # Allreduce
-    if world_size > 1:
-        for param in train_state.model.parameters():
-            if param.grad is not None:
-                dist.all_reduce(param.grad)
-
-    # Apply optimizer
-    lr_this_step = None
-    for optim, base_lr in zip(train_state.optimizers, train_state.optimizer_lrs):
-        lr_this_step = compute_lr(base_lr, config, train_state)
-
-        for param_group in optim.param_groups:
-            param_group["lr"] = lr_this_step
-
-        optim.step()
-        optim.zero_grad()
-
-    # Reduce metrics
-    if len(metrics):
-        assert not any(v.requires_grad for v in metrics.values())
-
-        metric_keys = list(
-            sorted(metrics.keys())
-        )  # Sort keys to guarantee all processes use the same order.
-        # Reduce and reconstruct
-        metric_values = torch.stack([metrics[k] for k in metric_keys])
+    # Only step optimizer when accumulation is complete
+    if not is_accumulation_step:
+        # Allreduce
         if world_size > 1:
-            dist.reduce(metric_values, dst=0)
+            for param in train_state.model.parameters():
+                if param.grad is not None:
+                    dist.all_reduce(param.grad)
 
-        if rank == 0:
-            metric_values = metric_values.cpu().numpy()
-            reduced_metrics = {k: metric_values[i] for i, k in enumerate(metric_keys)}
+        # Apply optimizer
+        lr_this_step = None
+        for optim, base_lr in zip(train_state.optimizers, train_state.optimizer_lrs):
+            lr_this_step = compute_lr(base_lr, config, train_state)
 
-            # Postprocess
-            count = max(reduced_metrics["count"], 1)  # Avoid NaNs
-            reduced_metrics = {
-                f"train/{k}": v / (global_batch_size if k.endswith("loss") else count)
-                for k, v in reduced_metrics.items()
-            }
+            for param_group in optim.param_groups:
+                param_group["lr"] = lr_this_step
 
-            reduced_metrics["train/lr"] = lr_this_step
-            return reduced_metrics
+            optim.step()
+            optim.zero_grad()
+
+    # Only reduce and return metrics when accumulation is complete
+    if not is_accumulation_step:
+        # Reduce metrics
+        if len(metrics):
+            assert not any(v.requires_grad for v in metrics.values())
+
+            metric_keys = list(
+                sorted(metrics.keys())
+            )  # Sort keys to guarantee all processes use the same order.
+            # Reduce and reconstruct
+            metric_values = torch.stack([metrics[k] for k in metric_keys])
+            if world_size > 1:
+                dist.reduce(metric_values, dst=0)
+
+            if rank == 0:
+                metric_values = metric_values.cpu().numpy()
+                reduced_metrics = {
+                    k: metric_values[i] for i, k in enumerate(metric_keys)
+                }
+
+                # Postprocess
+                count = max(reduced_metrics.get("count", 0), 1)  # Avoid NaNs
+                effective_batch_size = (
+                    config.global_batch_size * config.gradient_accumulation_steps
+                )
+                loss_count = max(
+                    reduced_metrics.get("loss_count", effective_batch_size), 1
+                )
+                reduced_metrics = {
+                    f"train/{k}": v / (loss_count if k.endswith("loss") else count)
+                    for k, v in reduced_metrics.items()
+                    if k not in ["loss_count"]  # Don't log loss_count itself
+                }
+
+                reduced_metrics["train/lr"] = lr_this_step
+                return reduced_metrics
 
 
 def evaluate(
@@ -685,7 +844,7 @@ def launch(hydra_config: DictConfig):
         "train",
         test_set_mode=False,
         epochs_per_iter=train_epochs_per_iter,
-        global_batch_size=config.global_batch_size,
+        global_batch_size=config.global_batch_size,  # HF convention: this is the per-step batch size
         rank=RANK,
         world_size=WORLD_SIZE,
     )
@@ -742,10 +901,6 @@ def launch(hydra_config: DictConfig):
 
     # Training Loop
     for _iter_id in range(total_iters):
-        print(
-            f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {_iter_id * train_epochs_per_iter}"
-        )
-
         ############ Train Iter
         if RANK == 0:
             print("TRAIN")
@@ -762,7 +917,7 @@ def launch(hydra_config: DictConfig):
                 config,
                 train_state,
                 batch,
-                global_batch_size,
+                batch_size=global_batch_size,  # From dataloader
                 rank=RANK,
                 world_size=WORLD_SIZE,
                 device=device,
@@ -777,9 +932,10 @@ def launch(hydra_config: DictConfig):
                 step_time = time.perf_counter() - step_start
                 benchmark_timings.append(step_time)
 
-            if RANK == 0 and metrics is not None:
-                wandb.log(metrics, step=train_state.step)
-                progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
+            if RANK == 0:
+                if metrics is not None:
+                    wandb.log(metrics, step=train_state.step)
+                    progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
             if config.ema:
                 assert ema_helper is not None
                 ema_helper.update(train_state.model)
