@@ -255,11 +255,13 @@ class TinyRecursiveModel_Inner(nn.Module):
 
     def _input_embeddings(self, input: torch.Tensor, puzzle_identifiers: torch.Tensor):
         # Token embedding
-        embedding = self.embed_tokens(input.to(torch.int32))
+        embedding = self.embed_tokens(
+            input.to(torch.int32)
+        )  # B, L, D (D is hidden dim)
 
         # Puzzle embeddings
         if self.config.puzzle_emb_ndim > 0:
-            puzzle_embedding = self.puzzle_emb(puzzle_identifiers)
+            puzzle_embedding = self.puzzle_emb(puzzle_identifiers)  # B, Puzzle_emb_len
 
             pad_count = (
                 self.puzzle_emb_len * self.config.hidden_size
@@ -276,7 +278,7 @@ class TinyRecursiveModel_Inner(nn.Module):
                     embedding,
                 ),
                 dim=-2,
-            )
+            )  # Concatenating along sequence length dimension
 
         # Position embeddings
         if self.config.pos_encodings == "learned":
@@ -292,18 +294,21 @@ class TinyRecursiveModel_Inner(nn.Module):
             return self.embed_scale * embedding
 
     def empty_latent_state(self, batch_size: int):
+        device = self.y_init.device
         return LatentState(
             y=torch.empty(
                 batch_size,
                 self.config.seq_len + self.puzzle_emb_len,
                 self.config.hidden_size,
                 dtype=self.forward_dtype,
+                device=device,
             ),
             z=torch.empty(
                 batch_size,
                 self.config.seq_len + self.puzzle_emb_len,
                 self.config.hidden_size,
                 dtype=self.forward_dtype,
+                device=device,
             ),
         )
 
@@ -374,13 +379,14 @@ class TinyRecursiveModel(nn.Module):
 
     def initial_carry(self, batch: dict[str, torch.Tensor]):
         batch_size = batch["inputs"].shape[0]
+        device = batch["inputs"].device
 
         return TinyRecursiveModelCarry(
             latent=self.inner.empty_latent_state(
                 batch_size
             ),  # Empty is expected, will be reset in first pass as all sequences are halted
-            steps=torch.zeros((batch_size,), dtype=torch.int32),
-            halted=torch.ones((batch_size,), dtype=torch.bool),  # Default to halted
+            steps=torch.zeros((batch_size,), dtype=torch.int32, device=device),
+            halted=torch.ones((batch_size,), dtype=torch.bool, device=device),  # Default to halted
             current_data={k: torch.empty_like(v) for k, v in batch.items()},
         )
 

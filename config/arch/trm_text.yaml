@@ -4,7 +4,7 @@ loss:
   loss_type: softmax_cross_entropy  # More stable than stablemax
 
 halt_exploration_prob: 0.1
-halt_max_steps: 16
+halt_max_steps: 8
 
 # Reduced recursion cycles for larger model
 y_cycles: 3  # Deep recursion cycles (reduced from 3)
