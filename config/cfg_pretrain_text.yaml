@@ -17,14 +17,14 @@ evaluators: []
 global_batch_size: 32
 gradient_accumulation_steps: 4
 
-epochs: 5  # Needed to match nanoGPT's 5k steps with batch_size=64
+epochs: 1  # Needed to match nanoGPT's 5k steps with batch_size=64
 eval_interval: 1
 min_eval_interval: 1
 checkpoint_every_eval: true
 
-lr: 5e-4
-lr_min_ratio: 0.5
-lr_warmup_steps: 100  # Longer warmup with larger batch size
+lr: 1e-3
+lr_min_ratio: 0.2
+lr_warmup_steps: 20  # Longer warmup with larger batch size
 
 # Standard hyperparameter settings for LM, as used in Llama
 beta1: 0.9
