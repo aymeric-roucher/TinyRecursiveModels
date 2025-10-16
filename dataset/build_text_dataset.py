@@ -21,7 +21,7 @@ class DataProcessConfig(BaseModel):
     output_dir: str = "data/text"
     model_name: str = "TaylorAI/gte-tiny"
     seq_len: int = 256
-    stride: int = 32  # Slide by 32 tokens for good coverage
+    stride: int = 1  # Stride for sliding window (1=every position, 32=every 32 tokens)
     train_split: float = 0.95  # 95% train, 5% test
 
 

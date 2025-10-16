@@ -1,6 +1,5 @@
 import copy
 import json
-import math
 import os
 import shutil
 import time
@@ -238,28 +237,28 @@ def create_lr_scheduler(
     min_lr_ratio: float,
 ) -> torch.optim.lr_scheduler.LRScheduler:
     """Create a warmup + cosine annealing LR scheduler using PyTorch built-ins."""
-    from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+    from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
     # Warmup phase: linear ramp from 0 to base_lr
     warmup_scheduler = LinearLR(
         optimizer,
         start_factor=1e-10,  # Start from very small LR
-        end_factor=1.0,      # End at base LR
-        total_iters=warmup_steps
+        end_factor=1.0,  # End at base LR
+        total_iters=warmup_steps,
     )
 
     # Cosine annealing phase: decay from base_lr to min_lr
     cosine_scheduler = CosineAnnealingLR(
         optimizer,
         T_max=total_steps - warmup_steps,
-        eta_min=optimizer.param_groups[0]['lr'] * min_lr_ratio
+        eta_min=optimizer.param_groups[0]["lr"] * min_lr_ratio,
     )
 
     # Combine them sequentially
     scheduler = SequentialLR(
         optimizer,
         schedulers=[warmup_scheduler, cosine_scheduler],
-        milestones=[warmup_steps]
+        milestones=[warmup_steps],
     )
 
     return scheduler
@@ -433,7 +432,12 @@ def init_train_state(
 
     # Model, optimizers, and schedulers
     model, optimizers, schedulers = create_model(
-        config, train_metadata, total_steps=total_steps, rank=rank, world_size=world_size, device=device
+        config,
+        train_metadata,
+        total_steps=total_steps,
+        rank=rank,
+        world_size=world_size,
+        device=device,
     )
 
     return TrainState(
@@ -926,8 +930,6 @@ def launch(hydra_config: DictConfig):
     # Training Loop
     for _iter_id in range(total_iters):
         ############ Train Iter
-        if RANK == 0:
-            print("TRAIN")
         train_state.model.train()
         for set_name, batch, global_batch_size in train_loader:
             # Benchmark timing

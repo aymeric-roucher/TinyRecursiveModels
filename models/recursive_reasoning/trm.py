@@ -233,18 +233,16 @@ class TinyRecursiveModel_Inner(nn.Module):
             ]
         )
 
-        # Initial states
-        self.y_init = nn.Buffer(
+        # Initial states - now learnable parameters for better adaptation
+        self.y_init = nn.Parameter(
             trunc_normal_init_(
                 torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1
-            ),
-            persistent=True,
+            )
         )
-        self.z_init = nn.Buffer(
+        self.z_init = nn.Parameter(
             trunc_normal_init_(
                 torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1
-            ),
-            persistent=True,
+            )
         )
 
         # Q head special init
@@ -287,11 +285,9 @@ class TinyRecursiveModel_Inner(nn.Module):
                 embedding + self.embed_pos.embedding_weight.to(self.forward_dtype)
             )
 
-        # Scale - but NOT for pretrained embeddings (they're already normalized)
-        if self.config.pretrained_embeddings_model:
-            return embedding
-        else:
-            return self.embed_scale * embedding
+        # Scale embeddings to maintain proper gradient flow
+        # Even pretrained embeddings need scaling to match the architecture's expected magnitude
+        return self.embed_scale * embedding
 
     def empty_latent_state(self, batch_size: int):
         device = self.y_init.device
@@ -330,22 +326,16 @@ class TinyRecursiveModel_Inner(nn.Module):
             batch["inputs"], batch["puzzle_identifiers"]
         )
 
-        # Deep recursion: y_cycles-1 without gradients, 1 with gradients
+        # Deep recursion: ALL cycles with gradients for better learning
         y, z = latent.y, latent.z
 
-        # (y_cycles-1) deep recursion cycles without gradients
-        with torch.no_grad():
-            for _y_cycle in range(self.config.y_cycles - 1):
-                # z_cycles latent recursion steps: update z given (x, y, z)
-                for _z_cycle in range(self.config.z_cycles):
-                    z = self.net(z, y + input_embeddings, **seq_info)
-                # Update y given (y, z)
-                y = self.net(y, z, **seq_info)
-
-        # Final cycle with gradients
-        for _z_cycle in range(self.config.z_cycles):
-            z = self.net(z, y + input_embeddings, **seq_info)
-        y = self.net(y, z, **seq_info)
+        # All y_cycles with gradients enabled
+        for _y_cycle in range(self.config.y_cycles):
+            # z_cycles latent recursion steps: update z given (x, y, z)
+            for _z_cycle in range(self.config.z_cycles):
+                z = self.net(z, y + input_embeddings, **seq_info)
+            # Update y given (y, z)
+            y = self.net(y, z, **seq_info)
 
         # Output: decode y to vocabulary logits
         new_latent = LatentState(
