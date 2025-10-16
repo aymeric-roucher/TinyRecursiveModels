@@ -96,7 +96,7 @@ class PretrainConfig(pydantic.BaseModel):
 class TrainState:
     model: nn.Module
     optimizers: Sequence[torch.optim.Optimizer]
-    optimizer_lrs: Sequence[float]
+    schedulers: Sequence[torch.optim.lr_scheduler.LRScheduler]
     carry: TinyRecursiveModelCarry | None
 
     step: int
@@ -231,9 +231,44 @@ def count_parameters(model: nn.Module) -> dict[str, float]:
     }
 
 
+def create_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    total_steps: int,
+    warmup_steps: int,
+    min_lr_ratio: float,
+) -> torch.optim.lr_scheduler.LRScheduler:
+    """Create a warmup + cosine annealing LR scheduler using PyTorch built-ins."""
+    from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+
+    # Warmup phase: linear ramp from 0 to base_lr
+    warmup_scheduler = LinearLR(
+        optimizer,
+        start_factor=1e-10,  # Start from very small LR
+        end_factor=1.0,      # End at base LR
+        total_iters=warmup_steps
+    )
+
+    # Cosine annealing phase: decay from base_lr to min_lr
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=total_steps - warmup_steps,
+        eta_min=optimizer.param_groups[0]['lr'] * min_lr_ratio
+    )
+
+    # Combine them sequentially
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_steps]
+    )
+
+    return scheduler
+
+
 def create_model(
     config: PretrainConfig,
     train_metadata: PuzzleDatasetMetadata,
+    total_steps: int,
     rank: int,
     world_size: int,
     device: torch.device,
@@ -297,45 +332,72 @@ def create_model(
                 for param in list(model.parameters()) + list(model.buffers()):
                     dist.broadcast(param, src=0)
 
-    # Optimizers and lr
+    # Optimizers and schedulers
     if config.arch.puzzle_emb_ndim == 0:
-        optimizers = [
-            torch.optim.AdamW(
-                model.parameters(),
-                lr=1e-8,  # Will be overridden by scheduler
-                weight_decay=config.weight_decay,
-                betas=(config.beta1, config.beta2),
-            )
-        ]
-        optimizer_lrs = [config.lr]
+        # Text training: single AdamW optimizer
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config.lr,
+            weight_decay=config.weight_decay,
+            betas=(config.beta1, config.beta2),
+        )
+        scheduler = create_lr_scheduler(
+            optimizer,
+            total_steps=total_steps,
+            warmup_steps=config.lr_warmup_steps,
+            min_lr_ratio=config.lr_min_ratio,
+        )
+        optimizers = [optimizer]
+        schedulers = [scheduler]
     elif config.freeze_weights:
-        optimizers = [
-            CastedSparseEmbeddingSignSGD_Distributed(
-                model.model.puzzle_emb.buffers(),  # type: ignore
-                lr=0,  # Needs to be set by scheduler
-                weight_decay=config.puzzle_emb_weight_decay,
-                world_size=world_size,
-            )
-        ]
-        optimizer_lrs = [config.puzzle_emb_lr]
+        # Puzzle training (freeze weights): sparse embedding optimizer only
+        optimizer = CastedSparseEmbeddingSignSGD_Distributed(
+            model.model.puzzle_emb.buffers(),  # type: ignore
+            lr=config.puzzle_emb_lr,
+            weight_decay=config.puzzle_emb_weight_decay,
+            world_size=world_size,
+        )
+        scheduler = create_lr_scheduler(
+            optimizer,
+            total_steps=total_steps,
+            warmup_steps=config.lr_warmup_steps,
+            min_lr_ratio=config.lr_min_ratio,
+        )
+        optimizers = [optimizer]
+        schedulers = [scheduler]
     else:
-        optimizers = [
-            CastedSparseEmbeddingSignSGD_Distributed(
-                model.model.puzzle_emb.buffers(),  # type: ignore
-                lr=0,  # Needs to be set by scheduler
-                weight_decay=config.puzzle_emb_weight_decay,
-                world_size=world_size,
-            ),
-            torch.optim.AdamW(
-                model.parameters(),
-                lr=1e-8,  # Will be overridden by scheduler
-                weight_decay=config.weight_decay,
-                betas=(config.beta1, config.beta2),
-            ),
-        ]
-        optimizer_lrs = [config.puzzle_emb_lr, config.lr]
+        # Puzzle training: both sparse embedding and AdamW
+        puzzle_optimizer = CastedSparseEmbeddingSignSGD_Distributed(
+            model.model.puzzle_emb.buffers(),  # type: ignore
+            lr=config.puzzle_emb_lr,
+            weight_decay=config.puzzle_emb_weight_decay,
+            world_size=world_size,
+        )
+        adamw_optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config.lr,
+            weight_decay=config.weight_decay,
+            betas=(config.beta1, config.beta2),
+        )
 
-    return model, optimizers, optimizer_lrs
+        # Create schedulers for both optimizers
+        puzzle_scheduler = create_lr_scheduler(
+            puzzle_optimizer,
+            total_steps=total_steps,
+            warmup_steps=config.lr_warmup_steps,
+            min_lr_ratio=config.lr_min_ratio,
+        )
+        adamw_scheduler = create_lr_scheduler(
+            adamw_optimizer,
+            total_steps=total_steps,
+            warmup_steps=config.lr_warmup_steps,
+            min_lr_ratio=config.lr_min_ratio,
+        )
+
+        optimizers = [puzzle_optimizer, adamw_optimizer]
+        schedulers = [puzzle_scheduler, adamw_scheduler]
+
+    return model, optimizers, schedulers
 
 
 def mix_weights_direct(device, alpha, net, nets):
@@ -350,32 +412,6 @@ def mix_weights_direct(device, alpha, net, nets):
         sd_alpha[k] = comb_net
     net.load_state_dict(sd_alpha)
     return net
-
-
-def cosine_schedule_with_warmup_lr_lambda(
-    current_step: int,
-    *,
-    base_lr: float,
-    num_warmup_steps: int,
-    num_training_steps: int,
-    min_ratio: float = 0.0,
-    num_cycles: float = 0.5,
-):
-    if current_step < num_warmup_steps:
-        return base_lr * float(current_step) / float(max(1, num_warmup_steps))
-
-    progress = float(current_step - num_warmup_steps) / float(
-        max(1, num_training_steps - num_warmup_steps)
-    )
-    return base_lr * (
-        min_ratio
-        + max(
-            0.0,
-            (1 - min_ratio)
-            * 0.5
-            * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)),
-        )
-    )
 
 
 def init_train_state(
@@ -395,9 +431,9 @@ def init_train_state(
         / effective_batch_size
     )
 
-    # Model
-    model, optimizers, optimizer_lrs = create_model(
-        config, train_metadata, rank=rank, world_size=world_size, device=device
+    # Model, optimizers, and schedulers
+    model, optimizers, schedulers = create_model(
+        config, train_metadata, total_steps=total_steps, rank=rank, world_size=world_size, device=device
     )
 
     return TrainState(
@@ -405,7 +441,7 @@ def init_train_state(
         total_steps=total_steps,
         model=model,
         optimizers=optimizers,
-        optimizer_lrs=optimizer_lrs,
+        schedulers=schedulers,
         carry=None,
     )
 
@@ -445,16 +481,6 @@ def load_checkpoint(model: nn.Module, config: PretrainConfig, device: torch.devi
                     .contiguous()
                 )
         model.load_state_dict(state_dict, assign=True)
-
-
-def compute_lr(base_lr: float, config: PretrainConfig, train_state: TrainState):
-    return cosine_schedule_with_warmup_lr_lambda(
-        current_step=train_state.step,
-        base_lr=base_lr,
-        num_warmup_steps=round(config.lr_warmup_steps),
-        num_training_steps=train_state.total_steps,
-        min_ratio=config.lr_min_ratio,
-    )
 
 
 def create_evaluators(
@@ -526,16 +552,14 @@ def train_batch(
                 if param.grad is not None:
                     dist.all_reduce(param.grad)
 
-        # Apply optimizer
-        lr_this_step = None
-        for optim, base_lr in zip(train_state.optimizers, train_state.optimizer_lrs):
-            lr_this_step = compute_lr(base_lr, config, train_state)
-
-            for param_group in optim.param_groups:
-                param_group["lr"] = lr_this_step
-
+        # Apply optimizer and step scheduler
+        for optim, scheduler in zip(train_state.optimizers, train_state.schedulers):
             optim.step()
+            scheduler.step()
             optim.zero_grad()
+
+        # Get LR for logging (from first optimizer)
+        lr_this_step = train_state.schedulers[0].get_last_lr()[0]
 
     # Only reduce and return metrics when accumulation is complete
     if not is_accumulation_step:
