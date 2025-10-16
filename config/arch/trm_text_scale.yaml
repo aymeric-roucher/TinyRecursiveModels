@@ -4,18 +4,18 @@ loss:
   loss_type: softmax_cross_entropy  # More stable than stablemax
 
 halt_exploration_prob: 0.1
-halt_max_steps: 16
+halt_max_steps: 8
 
-# Reduced recursion cycles for larger model
-y_cycles: 3  # Deep recursion cycles (reduced from 3)
-z_cycles: 3  # Latent recursion steps per cycle (reduced from 6)
+# Recursion cycles
+y_cycles: 2  # Deep recursion cycles
+z_cycles: 3  # Latent recursion steps per cycle
 
 H_layers: 0  # Deprecated (kept for backward compatibility)
-num_layers: 3 # Number of layers in the network
+num_layers: 12  # Scaled up for ~50M parameter model
 
 # Hidden size matches embedding dimension (384) - standard transformer practice
 hidden_size: 384
-num_heads: 6  # 384 / 64 = 6 heads
+num_heads: 6  # 384 / 64 = 6 heads (64-dim per head)
 expansion: 4
 
 # Pretrained embeddings from sentence-transformers

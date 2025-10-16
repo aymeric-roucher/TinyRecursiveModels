@@ -1,7 +1,7 @@
 # Text training config
 
 defaults:
-  - arch: trm_text
+  - arch: trm_text_scale
   - _self_
 
 hydra:
@@ -15,16 +15,16 @@ evaluators: []
 
 # Hyperparams - Training
 global_batch_size: 32
-# gradient_accumulation_steps: 4
+gradient_accumulation_steps: 8
 
-epochs: 2
+epochs: 3
 eval_interval: 1
 min_eval_interval: 1
 checkpoint_every_eval: true
 
 lr: 1e-6  # Reduced from 1e-4 for stability
 lr_min_ratio: 0.1
-lr_warmup_steps: 100  # Longer warmup with larger batch size
+lr_warmup_steps: 200  # Longer warmup with larger batch size
 
 # Standard hyperparameter settings for LM, as used in Llama
 beta1: 0.9
