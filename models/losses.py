@@ -100,6 +100,7 @@ class ACTLossHead(nn.Module):
                     valid_metrics & ((outputs["q_halt_logits"] >= 0) == seq_is_correct)
                 ).sum(),
                 "steps": torch.where(valid_metrics, new_carry.steps, 0).sum(),
+                "halted_count": new_carry.halted.sum(),  # Track how many halted
             }
 
         # Losses
@@ -115,10 +116,17 @@ class ACTLossHead(nn.Module):
             seq_is_correct.to(outputs["q_halt_logits"].dtype),
             reduction="sum",
         )
+        # Always log losses (important for text training where we want loss every step)
+        # For metrics normalization, use batch size instead of valid_metrics count
+        batch_size = labels.shape[0]
+
         metrics.update(
             {
                 "lm_loss": lm_loss.detach(),
                 "q_halt_loss": q_halt_loss.detach(),
+                "loss_count": torch.tensor(
+                    batch_size, dtype=torch.float32, device=labels.device
+                ),
             }
         )
         # Q continue (bootstrapping target loss); Alexia: This fits Q-learning, but seems totally unecessary

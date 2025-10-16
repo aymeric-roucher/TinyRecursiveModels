@@ -24,4 +24,5 @@ dependencies = [
     "wheel",
     "triton; sys_platform != 'darwin'",
     "adam-atan2-pytorch>=0.1.18",
+    "accelerate>=1.10.1",
 ]
